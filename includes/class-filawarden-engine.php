@@ -23,16 +23,24 @@ class FilaWardenEngine {
             if (preg_match('/MemTotal:\s+(\d+)/', $info, $m)) $memTotal = (int) $m[1] * 1024;
             if (preg_match('/MemAvailable:\s+(\d+)/', $info, $m)) $memAvail = (int) $m[1] * 1024;
         }
-        if ($memTotal === 0) {
-            $memTotal = 512 * 1024 * 1024;
-            $memAvail = $memTotal - memory_get_usage(true);
+        $memPct = null;
+        $memUsed = 0;
+        if ($memTotal > 0) {
+            $memUsed = max(0, $memTotal - $memAvail);
+            $memPct = (int) round(($memUsed / $memTotal) * 100);
         }
-        $memUsed = max(0, $memTotal - $memAvail);
-        $memPct = $memTotal > 0 ? (int) round(($memUsed / $memTotal) * 100) : 0;
-        $diskTotal = (float) @disk_total_space($root);
-        $diskFree = (float) @disk_free_space($root);
-        $diskUsed = max(0, $diskTotal - $diskFree);
-        $diskPct = $diskTotal > 0 ? (int) round(($diskUsed / $diskTotal) * 100) : 0;
+        $diskTotalRaw = @disk_total_space($root);
+        $diskFreeRaw = @disk_free_space($root);
+        $diskPct = null;
+        $diskTotal = 0.0;
+        $diskFree = 0.0;
+        $diskUsed = 0.0;
+        if ($diskTotalRaw !== false && $diskFreeRaw !== false) {
+            $diskTotal = (float) $diskTotalRaw;
+            $diskFree = (float) $diskFreeRaw;
+            $diskUsed = max(0, $diskTotal - $diskFree);
+            $diskPct = $diskTotal > 0 ? (int) round(($diskUsed / $diskTotal) * 100) : 0;
+        }
         $uptime = 'n/a';
         if (is_readable('/proc/uptime')) {
             $sec = (int) floatval(explode(' ', trim((string) file_get_contents('/proc/uptime')))[0]);
@@ -79,9 +87,16 @@ class FilaWardenEngine {
 
     public static function health(array $audit, array $resources): array {
         $deploymentScore = $audit['score'];
-        $cpuPenalty = max(0, $resources['cpu']['percentage'] - 50) * 1.5;
-        $memPenalty = max(0, $resources['memory']['percentage'] - 60) * 1.5;
-        $diskPenalty = max(0, $resources['disk']['percentage'] - 70) * 2.0;
+        $penalize = static function (mixed $percentage, int $start, float $multiplier): float {
+            if (!is_numeric($percentage)) {
+                return 0.0;
+            }
+
+            return max(0, ((float) $percentage) - $start) * $multiplier;
+        };
+        $cpuPenalty = $penalize($resources['cpu']['percentage'] ?? null, 50, 1.5);
+        $memPenalty = $penalize($resources['memory']['percentage'] ?? null, 60, 1.5);
+        $diskPenalty = $penalize($resources['disk']['percentage'] ?? null, 70, 2.0);
         $infra = (int) max(10, min(100, round(100 - ($cpuPenalty + $memPenalty + $diskPenalty))));
         $relPenalty = 0;
         foreach ($audit['checks'] as $c) {
@@ -114,28 +129,34 @@ class FilaWardenEngine {
         ];
     }
 
-    public static function riskFiles(string $root, int $limit = 40): array {
+    public static function riskFiles(string $root, int $limit = 40, array $skip = ['vendor', 'node_modules', '.git', 'core'], int $maxVisited = 8000): array {
         $found = [];
-        $skip = ['vendor', 'node_modules', '.git', 'core'];
-        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS));
         $n = 0;
-        foreach ($it as $file) {
-            if ($n > 8000) break;
-            $n++;
-            $path = $file->getPathname();
-            foreach ($skip as $s) {
-                if (str_contains($path, DIRECTORY_SEPARATOR . $s . DIRECTORY_SEPARATOR)) continue 2;
+        foreach (self::iterateFiles($root, $skip) as $file) {
+            if ($n > $maxVisited) {
+                break;
             }
-            if (!$file->isFile()) continue;
+            $n++;
+            if (!$file->isFile()) {
+                continue;
+            }
             $ext = strtolower($file->getExtension());
             $base = strtolower($file->getFilename());
             $kind = null;
-            if (in_array($ext, ['sql', 'sh'], true) || $base === '.env') $kind = 'high';
-            elseif (in_array($ext, ['zip', 'tar', 'gz'], true)) $kind = 'medium';
-            if (!$kind) continue;
-            $found[] = ['path' => $path, 'size' => $file->getSize(), 'kind' => $kind, 'name' => $file->getFilename()];
-            if (count($found) >= $limit) break;
+            if (in_array($ext, ['sql', 'sh'], true) || $base === '.env') {
+                $kind = 'high';
+            } elseif (in_array($ext, ['zip', 'tar', 'gz'], true)) {
+                $kind = 'medium';
+            }
+            if ($kind === null) {
+                continue;
+            }
+            $found[] = ['path' => $file->getPathname(), 'size' => $file->getSize(), 'kind' => $kind, 'name' => $file->getFilename()];
+            if (count($found) >= $limit) {
+                break;
+            }
         }
+
         return $found;
     }
 
@@ -167,9 +188,9 @@ class FilaWardenEngine {
         return $parsed;
     }
 
-    public static function ssl(string $host): array {
+    public static function ssl(string $host, bool $local = false): array {
         $host = strtolower(trim($host));
-        if (in_array($host, ['localhost', '127.0.0.1', '::1', ''], true)) {
+        if ($local || in_array($host, ['localhost', '127.0.0.1', '::1', ''], true)) {
             return ['status' => 'passed', 'host' => $host ?: 'localhost', 'message' => 'Local development host.', 'days' => null, 'issuer' => 'n/a', 'subject' => 'local', 'valid_from' => null, 'valid_to' => null];
         }
         if (!preg_match('/^[a-z0-9.-]+$/', $host)) {
@@ -200,12 +221,12 @@ class FilaWardenEngine {
         $samples = array_values(array_filter(array_map('intval', $samples), fn($n) => $n >= 0));
         sort($samples);
         $n = count($samples);
-        if ($n === 0) return ['p50' => 0, 'p95' => 0, 'p99' => 0, 'rpm' => 0, 'count' => 0];
+        if ($n === 0) return ['p50' => 0, 'p95' => 0, 'p99' => 0, 'count' => 0];
         $pick = function ($p) use ($samples, $n) {
             $i = (int) min($n - 1, max(0, ceil($p * $n) - 1));
             return (int) round($samples[$i]);
         };
-        return ['p50' => $pick(0.50), 'p95' => $pick(0.95), 'p99' => $pick(0.99), 'count' => $n, 'rpm' => $n];
+        return ['p50' => $pick(0.50), 'p95' => $pick(0.95), 'p99' => $pick(0.99), 'count' => $n];
     }
 
     public static function secretRules(): array {
@@ -260,26 +281,53 @@ class FilaWardenEngine {
         return $findings;
     }
 
-    public static function candidateFiles(string $root, int $max = 400): array {
+    public static function candidateFiles(string $root, int $max = 400, array $skip = ['vendor', 'node_modules', '.git', 'core']): array {
         $found = [];
-        if (!is_dir($root)) return [];
-        try {
-            $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS));
-        } catch (UnexpectedValueException) {
-            return [];
-        }
         $allow = ['php', 'env', 'json', 'yml', 'yaml', 'js', 'log', 'txt', 'ini'];
-        foreach ($it as $file) {
-            if (count($found) >= $max) break;
-            $path = $file->getPathname();
-            if (preg_match('#/(vendor|node_modules|\.git|core)/#', str_replace('\\', '/', $path))) continue;
-            if (!$file->isFile() || $file->isLink()) continue;
+        foreach (self::iterateFiles($root, $skip) as $file) {
+            if (count($found) >= $max) {
+                break;
+            }
+            if (!$file->isFile() || $file->isLink()) {
+                continue;
+            }
             $ext = strtolower($file->getExtension());
             $name = $file->getFilename();
-            if ($name === 'composer.lock' || $name === 'package-lock.json') continue;
-            if ($ext === 'env' || str_starts_with($name, '.env') || in_array($ext, $allow, true)) $found[] = $path;
+            if ($name === 'composer.lock' || $name === 'package-lock.json') {
+                continue;
+            }
+            if ($ext === 'env' || str_starts_with($name, '.env') || in_array($ext, $allow, true)) {
+                $found[] = $file->getPathname();
+            }
         }
+
         return $found;
+    }
+
+    /**
+     * Files under $root, without descending into skipped directory names.
+     * Skipped trees do not consume scan budgets.
+     *
+     * @param list<string> $skip
+     * @return Generator<int, SplFileInfo>
+     */
+    private static function iterateFiles(string $root, array $skip): Generator {
+        if (!is_dir($root)) {
+            return;
+        }
+        $skipSet = array_fill_keys($skip, true);
+        try {
+            $directory = new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS);
+            $filtered = new RecursiveCallbackFilterIterator($directory, static function ($current) use ($skipSet): bool {
+                return !($current->isDir() && isset($skipSet[$current->getFilename()]));
+            });
+            $iterator = new RecursiveIteratorIterator($filtered, RecursiveIteratorIterator::LEAVES_ONLY);
+            foreach ($iterator as $file) {
+                yield $file;
+            }
+        } catch (UnexpectedValueException) {
+            return;
+        }
     }
 
     public static function headerReport(array $headers): array {
