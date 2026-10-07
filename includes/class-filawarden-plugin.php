@@ -183,11 +183,11 @@ class FilaWardenPlugin {
 
     private function pageDashboard(): string {
         $h = $this->health();
-        $cards = '';
+        $pills = '';
         foreach ($h['vectors'] as $v) {
-            $cls = $v['status'] === 'healthy' ? '' : ($v['status'] === 'warning' ? ' warn' : ' bad');
-            $cards .= '<div class="fw-card"><div class="fw-k">' . esc_html($v['name']) . '</div><div class="fw-score" style="font-size:28px">' . (int) $v['score'] . '</div>' . $this->badge($v['status']) . '<div class="fw-bar' . $cls . '" style="margin-top:8px"><span style="width:' . (int) $v['score'] . '%"></span></div></div>';
+            $pills .= '<div class="fw-pill"><div class="fw-k">' . esc_html($v['name']) . '</div><div class="fw-score" style="font-size:18px">' . (int) $v['score'] . '%</div>' . $this->badge($v['status']) . '</div>';
         }
+        $hero = '<div class="fw-card"><div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap"><div class="fw-scoretile ' . esc_attr($h['status']) . '">' . (int) $h['overall'] . '</div><div><h3>Overall Operations Health</h3><p>Evaluated across 5 core reliability vectors. Last assessment: ' . esc_html($h['evaluated_at']) . '.</p>' . $this->badge($h['status']) . ' ' . esc_html($h['status_label']) . '</div></div><div class="fw-grid cols-4" style="margin-top:14px">' . $pills . '</div></div>';
         $links = [
             'auditor' => ['Deployment Auditor', '12 production readiness checks, debug state, and cache validation.'],
             'infrastructure' => ['Infrastructure Telemetry', 'Real-time /proc CPU load, RAM, disk headroom, and uptime.'],
@@ -204,7 +204,8 @@ class FilaWardenPlugin {
             $grid .= '<a class="fw-card fw-launch" href="' . $url . '"><h3>' . esc_html($meta[0]) . '</h3><p>' . esc_html($meta[1]) . '</p></a>';
         }
         $feed = '<div class="fw-feed">[' . esc_html(gmdate('H:i:s')) . '] INFO FilaWarden WordPress core online<br>[' . esc_html(gmdate('H:i:s')) . '] INFO Health ' . (int) $h['overall'] . ' (' . esc_html($h['status_label']) . ')</div>';
-        return '<div class="fw-grid cols-4"><div class="fw-card"><div class="fw-k">Overall</div><div class="fw-score">' . (int) $h['overall'] . '</div>' . $this->badge($h['status']) . '</div>' . $cards . '</div><div class="fw-card"><h3>Subsystem Quick Access</h3><p>Direct access to real-time operations diagnostics.</p><div class="fw-grid cols-4" style="margin-top:12px">' . $grid . '</div></div>' . $feed;
+        $banner = class_exists('FilaWardenPro') ? '' : '<div class="fw-banner"><div><strong>FilaWarden Pro</strong><div class="fw-note">Security intelligence, APM, incidents, and webhooks are in the commercial add-on.</div></div><a class="fw-btn amber" href="https://filawarden.com" target="_blank" rel="noopener">Upgrade</a></div>';
+        return $hero . $banner . '<div class="fw-card"><h3>Subsystem Quick Access</h3><p>Direct access to real-time operations diagnostics and monitoring telemetry.</p><div class="fw-grid cols-4" style="margin-top:12px">' . $grid . '</div></div>' . $feed;
     }
 
     private function pageAuditor(): string {
@@ -232,7 +233,7 @@ class FilaWardenPlugin {
         foreach ($crons as $ts => $hooks) {
             foreach ((array) $hooks as $hook => $events) {
                 if ($i++ > 25) break 2;
-                $rows .= '<tr><td class="fw-mono">' . esc_html($hook) . '</td><td>' . esc_html(gmdate('Y-m-d H:i', (int) $ts)) . '</td><td>' . count((array) $events) . '</td><td>' . $this->actionForm('forget_cron', ['hook' => $hook, 'ts' => (int) $ts], 'Forget') . '</td></tr>';
+                $rows .= '<tr><td class="fw-mono">' . esc_html($hook) . '</td><td>' . esc_html(gmdate('Y-m-d H:i', (int) $ts)) . '</td><td>' . count((array) $events) . '</td><td>' . $this->actionForm('retry_cron', ['hook' => $hook, 'ts' => (int) $ts], 'Retry') . ' ' . $this->actionForm('forget_cron', ['hook' => $hook, 'ts' => (int) $ts], 'Forget', 'danger') . '</td></tr>';
             }
         }
         if ($rows === '') $rows = '<tr><td colspan="4">No scheduled cron events.</td></tr>';
@@ -247,9 +248,10 @@ class FilaWardenPlugin {
 
     private function pageDatabase(): string {
         global $wpdb;
-        $tables = $wpdb->get_results('SHOW TABLE STATUS', ARRAY_A);
-        if (!is_array($tables)) {
-            $tables = [];
+        $tables = [];
+        if (method_exists($wpdb, 'get_results')) {
+            $tables = $wpdb->get_results('SHOW TABLE STATUS', ARRAY_A);
+            if (!is_array($tables)) $tables = [];
         }
         usort($tables, fn($a, $b) => ((int) ($b['Data_length'] ?? 0) + (int) ($b['Index_length'] ?? 0)) <=> ((int) ($a['Data_length'] ?? 0) + (int) ($a['Index_length'] ?? 0)));
         $tables = array_slice($tables, 0, 20);
@@ -266,15 +268,19 @@ class FilaWardenPlugin {
 
     private function pageLog(): string {
         $path = WP_CONTENT_DIR . '/debug.log';
-        $lines = FilaWardenEngine::tailLog($path);
-        $body = $lines ? implode("\n", array_map('esc_html', $lines)) : 'No debug.log yet. Enable WP_DEBUG_LOG to capture errors.';
+        $lines = FilaWardenEngine::parseLogLines(FilaWardenEngine::tailLog($path));
+        $body = '';
+        foreach ($lines as $row) {
+            $body .= $this->badge($row['level'] === 'error' || $row['level'] === 'critical' ? 'failed' : ($row['level'] === 'warning' ? 'warning' : 'passed')) . ' ' . esc_html($row['line']) . "\n";
+        }
+        if ($body === '') $body = 'No debug.log yet. Enable WP_DEBUG_LOG to capture errors.';
         return '<div class="fw-card"><div class="fw-k">' . esc_html($path) . '</div>' . $this->actionForm('truncate_log', [], 'Truncate log', 'danger') . '<pre class="fw-feed" style="margin-top:12px;white-space:pre-wrap">' . $body . '</pre></div>';
     }
 
     private function pageSsl(): string {
         $host = (string) wp_parse_url(home_url(), PHP_URL_HOST);
         $ssl = FilaWardenEngine::ssl($host);
-        return '<div class="fw-card"><div class="fw-k">Certificate</div><h3>' . esc_html($ssl['host']) . '</h3>' . $this->badge($ssl['status']) . '<p>' . esc_html($ssl['message']) . ' · issuer ' . esc_html((string) $ssl['issuer']) . '</p></div>';
+        return '<div class="fw-card"><div class="fw-k">Certificate</div><h3>' . esc_html($ssl['host']) . '</h3>' . $this->badge($ssl['status']) . '<p>' . esc_html($ssl['message']) . '</p><p>Issuer ' . esc_html((string) $ssl['issuer']) . ' · subject ' . esc_html((string) ($ssl['subject'] ?? '')) . ' · valid to ' . esc_html((string) ($ssl['valid_to'] ?? 'n/a')) . '</p></div>';
     }
 
     private function pageRisk(): string {
@@ -311,8 +317,15 @@ class FilaWardenPlugin {
         } elseif ($action === 'forget_cron') {
             $hook = sanitize_text_field(wp_unslash($_POST['fw_hook'] ?? ''));
             $ts = (int) ($_POST['fw_ts'] ?? 0);
-            if ($hook && $ts) {
+            if ($hook && $ts && preg_match('/^[A-Za-z0-9_-]+$/', $hook)) {
                 wp_unschedule_event($ts, $hook);
+            }
+        } elseif ($action === 'retry_cron') {
+            $hook = sanitize_text_field(wp_unslash($_POST['fw_hook'] ?? ''));
+            $ts = (int) ($_POST['fw_ts'] ?? 0);
+            if ($hook && $ts && preg_match('/^[A-Za-z0-9_-]+$/', $hook)) {
+                wp_unschedule_event($ts, $hook);
+                wp_schedule_single_event(time() + 5, $hook);
             }
         }
         wp_safe_redirect(wp_get_referer() ?: admin_url('admin.php?page=filawarden'));
