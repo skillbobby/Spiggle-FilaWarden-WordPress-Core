@@ -4,31 +4,10 @@
  */
 class FilaWardenEngine {
     public static function resources(string $root): array {
-        $load = [0, 0, 0];
-        if (is_readable('/proc/loadavg')) {
-            $parts = explode(' ', trim((string) file_get_contents('/proc/loadavg')));
-            $load = [ (float) ($parts[0] ?? 0), (float) ($parts[1] ?? 0), (float) ($parts[2] ?? 0) ];
-        } else {
-            $avg = function_exists('sys_getloadavg') ? sys_getloadavg() : [0, 0, 0];
-            $load = array_map('floatval', $avg ?: [0, 0, 0]);
-        }
-        $cores = 1;
-        if (is_readable('/proc/cpuinfo')) {
-            $cores = max(1, substr_count((string) file_get_contents('/proc/cpuinfo'), 'processor'));
-        }
+        $load = self::loadAverage();
+        $cores = self::cpuCores();
         $cpu = (int) min(100, round(($load[0] / $cores) * 100));
-        $memTotal = 0; $memAvail = 0;
-        if (is_readable('/proc/meminfo')) {
-            $info = (string) file_get_contents('/proc/meminfo');
-            if (preg_match('/MemTotal:\s+(\d+)/', $info, $m)) $memTotal = (int) $m[1] * 1024;
-            if (preg_match('/MemAvailable:\s+(\d+)/', $info, $m)) $memAvail = (int) $m[1] * 1024;
-        }
-        $memPct = null;
-        $memUsed = 0;
-        if ($memTotal > 0) {
-            $memUsed = max(0, $memTotal - $memAvail);
-            $memPct = (int) round(($memUsed / $memTotal) * 100);
-        }
+        $memory = self::hostMemory();
         $diskTotalRaw = @disk_total_space($root);
         $diskFreeRaw = @disk_free_space($root);
         $diskPct = null;
@@ -41,18 +20,224 @@ class FilaWardenEngine {
             $diskUsed = max(0, $diskTotal - $diskFree);
             $diskPct = $diskTotal > 0 ? (int) round(($diskUsed / $diskTotal) * 100) : 0;
         }
-        $uptime = 'n/a';
-        if (is_readable('/proc/uptime')) {
-            $sec = (int) floatval(explode(' ', trim((string) file_get_contents('/proc/uptime')))[0]);
-            $uptime = sprintf('%dd %dh %dm', intdiv($sec, 86400), intdiv($sec % 86400, 3600), intdiv($sec % 3600, 60));
-        }
+
         return [
             'cpu' => ['percentage' => $cpu, 'load' => $load, 'cores' => $cores],
-            'memory' => ['percentage' => $memPct, 'used' => $memUsed, 'total' => $memTotal],
+            'memory' => $memory,
             'disk' => ['percentage' => $diskPct, 'used' => $diskUsed, 'total' => $diskTotal, 'free' => $diskFree],
             'php' => PHP_VERSION,
-            'uptime' => $uptime,
+            'uptime' => self::uptimeLabel(self::uptimeSeconds()),
         ];
+    }
+
+    public static function cpuListCount(string $list): int {
+        $count = 0;
+        foreach (explode(',', $list) as $part) {
+            $part = trim($part);
+            if (preg_match('/^(\d+)-(\d+)$/', $part, $match) === 1) {
+                $count += max(0, (int) $match[2] - (int) $match[1] + 1);
+            } elseif (preg_match('/^\d+$/', $part) === 1) {
+                $count++;
+            }
+        }
+
+        return $count;
+    }
+
+    /**
+     * @return array{percentage: ?int, used: int, total: int}|null
+     */
+    public static function memoryFromText(string $text): ?array {
+        $fields = self::memoryFields($text);
+        $totalKb = $fields['MemTotal'] ?? 0;
+        if ($totalKb <= 0) {
+            return null;
+        }
+        if ($fields['MemAvailable'] !== null) {
+            $availableKb = $fields['MemAvailable'];
+        } else {
+            // Same inputs as the kernel available-memory estimate, without the
+            // zone low-watermark holdback. Watermarks live in /proc/zoneinfo.
+            $availableKb = ($fields['MemFree'] ?? 0)
+                + ($fields['Active(file)'] ?? 0)
+                + ($fields['Inactive(file)'] ?? 0)
+                + ($fields['SReclaimable'] ?? 0);
+        }
+
+        return self::memoryPair($totalKb, $availableKb);
+    }
+
+    public static function startTicks(string $stat): ?int {
+        $end = strrpos($stat, ')');
+        if ($end === false) {
+            return null;
+        }
+        $fields = preg_split('/\s+/', trim(substr($stat, $end + 1))) ?: [];
+        if (!isset($fields[19]) || !is_numeric($fields[19])) {
+            return null;
+        }
+
+        return (int) $fields[19];
+    }
+
+    public static function uptimeLabel(?int $seconds): string {
+        if ($seconds === null || $seconds < 0) {
+            return 'n/a';
+        }
+
+        return sprintf('%dd %dh %dm', intdiv($seconds, 86400), intdiv($seconds % 86400, 3600), intdiv($seconds % 3600, 60));
+    }
+
+    /** @return array{0: float, 1: float, 2: float} */
+    private static function loadAverage(): array {
+        $text = self::readText('/proc/loadavg');
+        if ($text !== null) {
+            $parts = explode(' ', trim($text));
+
+            return [(float) ($parts[0] ?? 0), (float) ($parts[1] ?? 0), (float) ($parts[2] ?? 0)];
+        }
+        $avg = function_exists('sys_getloadavg') ? sys_getloadavg() : false;
+        if (!is_array($avg) || !isset($avg[0], $avg[1], $avg[2])) {
+            return [0.0, 0.0, 0.0];
+        }
+
+        return [(float) $avg[0], (float) $avg[1], (float) $avg[2]];
+    }
+
+    private static function cpuCores(): int {
+        $info = self::readText('/proc/cpuinfo');
+        if ($info !== null) {
+            $count = substr_count($info, 'processor');
+            if ($count > 0) {
+                return $count;
+            }
+        }
+        $online = self::readText('/sys/devices/system/cpu/online');
+        if ($online !== null) {
+            $count = self::cpuListCount($online);
+            if ($count > 0) {
+                return $count;
+            }
+        }
+
+        return 1;
+    }
+
+    /** @return array{percentage: ?int, used: int, total: int} */
+    private static function hostMemory(): array {
+        $proc = self::readText('/proc/meminfo');
+        if ($proc !== null) {
+            $parsed = self::memoryFromText($proc);
+            if ($parsed !== null) {
+                return $parsed;
+            }
+        }
+        $total = 0;
+        $free = 0;
+        $active = 0;
+        $inactive = 0;
+        $reclaimable = 0;
+        $available = 0;
+        $haveAvailable = true;
+        $saw = false;
+        foreach (glob('/sys/devices/system/node/node*/meminfo') ?: [] as $path) {
+            $text = self::readText($path);
+            if ($text === null) {
+                continue;
+            }
+            $fields = self::memoryFields($text);
+            if (($fields['MemTotal'] ?? 0) <= 0) {
+                continue;
+            }
+            $saw = true;
+            $total += $fields['MemTotal'];
+            $free += $fields['MemFree'] ?? 0;
+            $active += $fields['Active(file)'] ?? 0;
+            $inactive += $fields['Inactive(file)'] ?? 0;
+            $reclaimable += $fields['SReclaimable'] ?? 0;
+            if ($fields['MemAvailable'] === null) {
+                $haveAvailable = false;
+            } else {
+                $available += $fields['MemAvailable'];
+            }
+        }
+        if (!$saw || $total <= 0) {
+            return ['percentage' => null, 'used' => 0, 'total' => 0];
+        }
+        if (!$haveAvailable) {
+            $available = $free + $active + $inactive + $reclaimable;
+        }
+
+        return self::memoryPair($total, $available);
+    }
+
+    /** @return array{percentage: int, used: int, total: int} */
+    private static function memoryPair(int $totalKb, int $availableKb): array {
+        $total = $totalKb * 1024;
+        $available = max(0, min($totalKb, $availableKb)) * 1024;
+        $used = max(0, $total - $available);
+
+        return [
+            'percentage' => (int) round(($used / $total) * 100),
+            'used' => $used,
+            'total' => $total,
+        ];
+    }
+
+    /** @return array<string, ?int> */
+    private static function memoryFields(string $text): array {
+        $keys = ['MemTotal', 'MemFree', 'MemAvailable', 'Active(file)', 'Inactive(file)', 'SReclaimable'];
+        $fields = array_fill_keys($keys, null);
+        foreach ($keys as $key) {
+            $quoted = preg_quote($key, '/');
+            if (preg_match('/(?:^|\n)\s*(?:Node\s+\d+\s+)?' . $quoted . ':\s+(\d+)/', $text, $match) === 1) {
+                $fields[$key] = (int) $match[1];
+            }
+        }
+
+        return $fields;
+    }
+
+    private static function uptimeSeconds(): ?int {
+        $text = self::readText('/proc/uptime');
+        if ($text !== null) {
+            return max(0, (int) floatval(explode(' ', trim($text))[0]));
+        }
+        // Apache on current Ubuntu hides /proc/uptime (ProcSubset=pid). A new
+        // process can still read its own start time, which is the boot uptime.
+        if (!function_exists('shell_exec') || self::functionDisabled('shell_exec')) {
+            return null;
+        }
+        foreach (['/bin/cat', '/usr/bin/cat'] as $cat) {
+            if (!is_executable($cat)) {
+                continue;
+            }
+            $stat = shell_exec($cat . ' /proc/self/stat 2>/dev/null');
+            $ticks = is_string($stat) ? self::startTicks($stat) : null;
+            if ($ticks !== null) {
+                return (int) round($ticks / 100);
+            }
+        }
+
+        return null;
+    }
+
+    private static function functionDisabled(string $name): bool {
+        $disabled = array_map('trim', explode(',', (string) ini_get('disable_functions')));
+
+        return in_array($name, $disabled, true);
+    }
+
+    private static function readText(string $path): ?string {
+        if (!is_readable($path)) {
+            return null;
+        }
+        $text = @file_get_contents($path);
+        if (!is_string($text) || $text === '') {
+            return null;
+        }
+
+        return $text;
     }
 
     public static function bytes(float $n): string {
@@ -164,12 +349,11 @@ class FilaWardenEngine {
         if ($path === '' || !is_readable($path)) return [];
         $size = filesize($path);
         if ($size === false || $size === 0) return [];
-        $fp = fopen($path, 'rb');
-        if (!$fp) return [];
         $read = (int) min($size, 200000);
-        fseek($fp, -$read, SEEK_END);
-        $chunk = fread($fp, $read) ?: '';
-        fclose($fp);
+        $chunk = file_get_contents($path, false, null, $size - $read, $read);
+        if (!is_string($chunk) || $chunk === '') {
+            return [];
+        }
         $lines = array_values(array_filter(preg_split('/\r\n|\n|\r/', $chunk) ?: []));
         return array_slice($lines, -$max);
     }
@@ -205,7 +389,7 @@ class FilaWardenEngine {
         if (!$client) return ['status' => 'failed', 'host' => $host, 'message' => $errstr ?: 'TLS handshake failed', 'days' => null, 'issuer' => 'n/a', 'subject' => '', 'valid_from' => null, 'valid_to' => null];
         $params = stream_context_get_params($client);
         $cert = openssl_x509_parse($params['options']['ssl']['peer_certificate'] ?? '') ?: [];
-        fclose($client);
+        fclose($client); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- This closes the TLS socket, not a file.
         $to = (int) ($cert['validTo_time_t'] ?? 0);
         $from = (int) ($cert['validFrom_time_t'] ?? 0);
         $days = $to ? (int) floor(($to - time()) / 86400) : null;
@@ -344,7 +528,8 @@ class FilaWardenEngine {
 
     public static function validWebhook(string $url): bool {
         if (!filter_var($url, FILTER_VALIDATE_URL)) return false;
-        $parts = parse_url($url);
-        return ($parts['scheme'] ?? '') === 'https' && !empty($parts['host']);
+        $parts = wp_parse_url($url);
+
+        return is_array($parts) && ($parts['scheme'] ?? '') === 'https' && !empty($parts['host']);
     }
 }

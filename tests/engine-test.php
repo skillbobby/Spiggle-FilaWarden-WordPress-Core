@@ -3,6 +3,11 @@
  * CLI checks for the collector and config. These do not boot WordPress.
  * Assertions are explicit because zend.assertions=-1 compiles assert() out.
  */
+if (!function_exists('wp_parse_url')) {
+    function wp_parse_url($url, $component = -1) {
+        return $component === -1 ? parse_url($url) : parse_url($url, $component);
+    }
+}
 require __DIR__ . '/../includes/class-filawarden-engine.php';
 
 function fw_check(bool $ok, string $message): void {
@@ -31,7 +36,21 @@ fw_check($audit['passed'] === 3 && $audit['warnings'] === 2 && $audit['failed'] 
 $resources = FilaWardenEngine::resources(sys_get_temp_dir());
 fw_check(array_key_exists('percentage', $resources['cpu']), 'cpu telemetry key');
 fw_check(array_key_exists('percentage', $resources['memory']), 'memory telemetry key');
+fw_check(is_int($resources['memory']['percentage']), 'this host reports memory');
+fw_check($resources['uptime'] !== 'n/a', 'this host reports uptime');
+fw_check($resources['cpu']['cores'] >= 1, 'cpu core count');
 fw_check($resources['php'] === PHP_VERSION, 'php version is the running interpreter');
+fw_check(FilaWardenEngine::cpuListCount("0-3\n") === 4, 'cpu online range');
+fw_check(FilaWardenEngine::cpuListCount('0-1,4-7') === 6, 'cpu online list');
+fw_check(FilaWardenEngine::cpuListCount('3') === 1, 'single cpu');
+$exact = FilaWardenEngine::memoryFromText("MemTotal: 1000 kB\nMemAvailable: 400 kB\n");
+fw_check($exact !== null && $exact['total'] === 1000 * 1024 && $exact['used'] === 600 * 1024 && $exact['percentage'] === 60, 'meminfo uses MemAvailable');
+$node = FilaWardenEngine::memoryFromText("Node 0 MemTotal: 1000 kB\nNode 0 MemFree: 100 kB\nNode 0 Active(file): 50 kB\nNode 0 Inactive(file): 150 kB\nNode 0 SReclaimable: 50 kB\n");
+fw_check($node !== null && $node['used'] === 650 * 1024 && $node['percentage'] === 65, 'sysfs memory estimates available bytes');
+fw_check(FilaWardenEngine::startTicks('5963 (cat) R 5962 144 144 0 -1 4194304 441 0 0 0 0 0 0 0 20 0 1 0 1187479 16633856') === 1187479, 'start ticks follow the process name');
+fw_check(FilaWardenEngine::startTicks('12 (my proc) R 1 1 1 1 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 50 0') === 50, 'start ticks allow a space in the process name');
+fw_check(FilaWardenEngine::uptimeLabel(90061) === '1d 1h 1m', 'uptime label');
+fw_check(FilaWardenEngine::uptimeLabel(null) === 'n/a', 'missing uptime');
 
 $health = FilaWardenEngine::health($audit, $resources);
 fw_check(count($health['vectors']) === 5, 'vectors');
@@ -153,8 +172,8 @@ fw_check(FilaWardenEngine::bytes(1536) === '1.5 KB', 'kilobytes');
 
 require __DIR__ . '/../includes/class-filawarden-config.php';
 $config = FilaWardenConfig::all();
-fw_check($config['max_scanned_files'] === 500, 'scan cap matches Laravel config');
-fw_check($config['apm']['slow_query_threshold_ms'] === 500, 'slow query threshold matches Laravel config');
+fw_check($config['max_scanned_files'] === 500, 'scan cap default is 500');
+fw_check($config['apm']['slow_query_threshold_ms'] === 500, 'slow query threshold default is 500');
 fw_check($config['apm']['slow_request_threshold_ms'] === 1000, 'slow request threshold');
 fw_check(str_starts_with($config['pro_upgrade_url'], 'https://'), 'upgrade url is https');
 fw_check(str_starts_with($config['managed_cloud_url'], 'https://'), 'managed cloud url is https');

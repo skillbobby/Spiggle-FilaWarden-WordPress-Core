@@ -1,14 +1,12 @@
 # FilaWarden Core for WordPress
 
-Same activities and operations shell as [FilaWarden Core](https://github.com/skillbobby/Spiggle-FilaWarden-Core) for Laravel Filament.
-
 - Executive dashboard with 5-vector health scoring
 - 12-point deployment readiness auditor
-- Infrastructure telemetry from `/proc` (CPU, RAM, disk)
+- Infrastructure telemetry (CPU, memory, disk, uptime)
 - Queue / WP-Cron monitor with retry and forget
 - Scheduler heartbeat
 - Database footprint and top 20 tables
-- Error log tail parser
+- Error log tail parser. The screen reads the log and does not change the file.
 - SSL/TLS sentinel
 - Risk file scanner (`.sql`, `.sh`, archives, `.env`)
 

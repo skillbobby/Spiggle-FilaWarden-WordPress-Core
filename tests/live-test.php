@@ -48,17 +48,21 @@ function fw_core_live_tests(): void {
 
     $css = FwLive::request(plugins_url('assets/css/filawarden.css', FILAWARDEN_FILE), ['cookie' => '']);
     FwLive::ok($css['status'] === 200 && str_contains($css['body'], '.fw-grid.cols-5'), 'stylesheet is served and has the five-column grid');
+    FwLive::ok(str_contains($css['body'], 'navigation: none') && str_contains($css['body'], 'view-transition-name: none'), 'stylesheet hides the admin chrome and its view transition');
     $js = FwLive::request(plugins_url('assets/js/filawarden.js', FILAWARDEN_FILE), ['cookie' => '']);
     FwLive::ok($js['status'] === 200 && str_contains($js['body'], 'filawarden-theme') && str_contains($js['body'], 'fw-dark'), 'theme script is served');
+    $boot = FwLive::request(plugins_url('assets/js/filawarden-boot.js', FILAWARDEN_FILE), ['cookie' => '']);
+    FwLive::ok($boot['status'] === 200 && str_contains($boot['body'], 'filawarden-theme') && str_contains($boot['body'], 'fw-dark'), 'theme boot script is served');
 
     $plainAdmin = FwLive::request(admin_url('index.php'));
     FwLive::ok($plainAdmin['status'] === 200, 'wp-admin HTTP ' . $plainAdmin['status']);
-    FwLive::ok(!str_contains($plainAdmin['body'], 'id="fw-screen"'), 'wp-admin keeps its own menu');
+    FwLive::ok(!str_contains($plainAdmin['body'], 'id="fw-screen"') && !str_contains($plainAdmin['body'], 'filawarden-css'), 'wp-admin keeps its own menu');
     FwLive::ok(str_contains($plainAdmin['body'], 'adminmenu'), 'wp-admin menu markup is present');
 
     $plugin = FilaWardenPlugin::instance();
     FwLive::ok(count($plugin->checks()) === 12, 'auditor has 12 checks');
-    $dashboard = FwLive::screen('filawarden', ['Executive Dashboard', 'cols-5', 'grp">Core', 'Overall Operations Health']);
+    $dashboard = FwLive::screen('filawarden', ['Executive Dashboard', 'cols-5', 'grp">Core', 'Overall Operations Health', 'filawarden-logo.svg', 'WordPress menu']);
+    FwLive::ok(!str_contains($dashboard, '>FW<'), 'the FW monogram is gone');
     FwLive::ok(substr_count($dashboard, 'fw-pill') === 5, 'dashboard renders five health pills');
     foreach ($plugin->pages() as $label) {
         FwLive::ok(str_contains($dashboard, $label), "dashboard links {$label}");
@@ -71,7 +75,10 @@ function fw_core_live_tests(): void {
     }
 
     $resources = FilaWardenEngine::resources(ABSPATH);
-    FwLive::screen('filawarden-infrastructure', ['Infrastructure', $resources['php'], 'Runtime']);
+    $infra = FwLive::screen('filawarden-infrastructure', ['Infrastructure', $resources['php'], 'Runtime']);
+    FwLive::ok(!str_contains($infra, 'Memory metrics unavailable'), 'infrastructure page shows host memory');
+    FwLive::ok(!str_contains($infra, 'uptime n/a'), 'infrastructure page shows host uptime');
+    FwLive::ok(preg_match('/uptime \d+d \d+h \d+m/', $infra) === 1, 'uptime is days, hours, and minutes');
     FwLive::screen('filawarden-queues', ['WP-Cron queue', 'Retry', 'Forget']);
 
     wp_clear_scheduled_hook('filawarden_heartbeat_event');
@@ -96,7 +103,8 @@ function fw_core_live_tests(): void {
     FwLive::ok($tables !== [] && str_contains($database, (string) $tables[0]['Name']), 'database lists the largest table');
 
     $logPath = FilaWardenConfig::logPath();
-    FwLive::screen('filawarden-error-log', ['Error Log', $logPath !== '' ? $logPath : 'Log path not set']);
+    $logPage = FwLive::screen('filawarden-error-log', ['Error Log', $logPath !== '' ? $logPath : 'Log path not set', 'does not change the file']);
+    FwLive::ok(!str_contains($logPage, 'truncate_log') && !str_contains($logPage, 'Truncate log'), 'error log has no truncate control');
 
     $host = (string) wp_parse_url(home_url(), PHP_URL_HOST);
     $local = in_array(wp_get_environment_type(), ['local', 'development'], true);
@@ -112,7 +120,8 @@ function fw_core_live_tests(): void {
 
     $previousLog = ($logPath !== '' && is_file($logPath)) ? (string) file_get_contents($logPath) : null;
     $logMarker = 'fw-live-log-' . wp_generate_password(8, false);
-    if ($previousLog !== null && is_writable($logPath)) {
+    $wroteMarker = $previousLog !== null && is_writable($logPath);
+    if ($wroteMarker) {
         file_put_contents($logPath, $previousLog . $logMarker . "\n", LOCK_EX);
     }
     FwLive::cleanup(static function () use ($logPath, $previousLog): void {
@@ -120,14 +129,10 @@ function fw_core_live_tests(): void {
             file_put_contents($logPath, $previousLog);
         }
     });
-    $truncated = FwLive::post('core', 'truncate_log', [], 'filawarden-error-log');
-    $logNotice = FwLive::notice($truncated);
-    if ($logNotice === 'log_truncated') {
-        $now = (string) file_get_contents($logPath);
-        FwLive::ok(!str_contains($now, $logMarker), 'truncate removed the log marker');
-        file_put_contents($logPath, $previousLog);
-    } else {
-        FwLive::ok($logNotice === 'log_locked', 'log truncate notice was ' . $logNotice);
+    $rejected = FwLive::post('core', 'truncate_log', [], 'filawarden-error-log');
+    FwLive::expectNotice($rejected, 'fix_unavailable', 'truncate is not an action');
+    if ($wroteMarker) {
+        FwLive::ok(str_contains((string) file_get_contents($logPath), $logMarker), 'rejected truncate left the log marker in place');
     }
 
     $hook = 'fw_live_probe';

@@ -1,10 +1,11 @@
 <?php
 /**
  * Plugin Name: FilaWarden Core
- * Description: Operations intelligence, deployment auditor, and production sentinel for WordPress. Same activities and look as FilaWarden for Filament.
- * Version: 1.0.2
+ * Description: Operations intelligence, deployment auditor, and production sentinel for WordPress.
+ * Version: 1.0.3
  * Author: Spiggle
  * License: MIT
+ * License URI: https://opensource.org/licenses/MIT
  * Requires at least: 6.4
  * Requires PHP: 8.1
  * Text Domain: filawarden
@@ -14,7 +15,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('FILAWARDEN_VERSION', '1.0.2');
+define('FILAWARDEN_VERSION', '1.0.3');
 define('FILAWARDEN_FILE', __FILE__);
 define('FILAWARDEN_DIR', plugin_dir_path(__FILE__));
 

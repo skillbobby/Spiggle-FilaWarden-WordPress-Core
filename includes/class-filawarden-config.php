@@ -2,11 +2,10 @@
 /**
  * Runtime configuration.
  *
- * Defaults match the Laravel packages' config/filawarden.php and
- * config/filawarden-advanced.php. Override a value with a wp-config.php
- * constant, an environment variable of the same name, or the
- * `filawarden_config` filter. Nothing in the plugins embeds a site URL,
- * license key, webhook, or log path.
+ * Override a value with a wp-config.php constant, an environment
+ * variable of the same name, or the `filawarden_config` filter.
+ * Nothing in the plugins embeds a site URL, license key, webhook,
+ * or log path.
  */
 class FilaWardenConfig {
     public static function all(): array {

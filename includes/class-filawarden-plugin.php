@@ -41,7 +41,6 @@ class FilaWardenPlugin {
         add_action('admin_menu', [$this, 'menu']);
         add_filter('admin_body_class', [$this, 'bodyClass']);
         add_action('admin_enqueue_scripts', [$this, 'assets']);
-        add_action('admin_head', [$this, 'screenChrome']);
         add_action('admin_post_filawarden_action', [$this, 'handleAction']);
     }
 
@@ -57,22 +56,6 @@ class FilaWardenPlugin {
         }
 
         return $classes;
-    }
-
-    public function screenChrome(): void {
-        if (!$this->isScreen()) {
-            return;
-        }
-        echo '<style id="fw-screen">'
-            . '@media (prefers-reduced-motion: no-preference){@view-transition{navigation:none}}'
-            . 'body.fw-screen #adminmenu>.menu-top,body.fw-screen #wpadminbar,body.fw-screen #adminmenuwrap,body.fw-screen #adminmenuback{view-transition-name:none!important}'
-            . 'html:has(body.fw-screen){padding-top:0!important;height:100%;overflow:hidden;background:#f1f5f9}'
-            . 'html.fw-dark:has(body.fw-screen){background:#0b1220}'
-            . 'body.fw-screen{overflow:hidden;height:100%;background:#f1f5f9}'
-            . 'html.fw-dark body.fw-screen{background:#0b1220}'
-            . 'body.fw-screen #wpadminbar,body.fw-screen #adminmenuback,body.fw-screen #adminmenuwrap,body.fw-screen #wpfooter,body.fw-screen #screen-meta,body.fw-screen #screen-meta-links,body.fw-screen .update-nag,body.fw-screen .notice{display:none!important}'
-            . 'body.fw-screen #wpwrap,body.fw-screen #wpcontent,body.fw-screen #wpbody,body.fw-screen #wpbody-content{margin:0!important;padding:0!important;height:100%;overflow:hidden;background:transparent}'
-            . '</style><script>try{if(localStorage.getItem("filawarden-theme")==="dark")document.documentElement.classList.add("fw-dark")}catch(e){}</script>';
     }
 
     public function cap(): string {
@@ -112,6 +95,8 @@ class FilaWardenPlugin {
             return;
         }
         wp_enqueue_style('filawarden', plugins_url('assets/css/filawarden.css', FILAWARDEN_FILE), [], FILAWARDEN_VERSION);
+        // Head script so the dark class is set before the shell paints.
+        wp_enqueue_script('filawarden-boot', plugins_url('assets/js/filawarden-boot.js', FILAWARDEN_FILE), [], FILAWARDEN_VERSION, false);
         wp_enqueue_script('filawarden', plugins_url('assets/js/filawarden.js', FILAWARDEN_FILE), [], FILAWARDEN_VERSION, true);
     }
 
@@ -128,7 +113,8 @@ class FilaWardenPlugin {
             return;
         }
         $page = $this->currentPage();
-        echo $this->shell($page, $this->body($page));
+        // shell() and body() escape every value before this markup is printed.
+        echo $this->shell($page, $this->body($page)); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
     }
 
     public function titles(): array {
@@ -166,8 +152,10 @@ class FilaWardenPlugin {
         }
         $title = esc_html($this->titles()[$page] ?? 'FilaWarden');
         $health = $this->health();
+        $logo = esc_url(plugins_url('assets/img/filawarden-logo.svg', FILAWARDEN_FILE));
+        $wordpress = esc_url(admin_url('index.php'));
 
-        return '<div class="fw-app" id="fw-app"><aside class="fw-sidebar"><div class="fw-brand"><div class="fw-mark">FW</div><div><strong>FilaWarden</strong><span>Operations</span></div></div><nav class="fw-nav"><div class="grp">Core</div>' . $nav . $pro . '</nav></aside><main class="fw-main"><header class="fw-top"><div><h1>' . $title . '</h1><p>WordPress operations sentinel · ' . esc_html($health['status_label']) . ' ' . (int) $health['overall'] . '</p></div><div class="fw-actions"><button type="button" class="fw-btn" id="fw-theme" aria-pressed="false">Dark mode</button><a class="fw-btn" href="' . esc_url(admin_url()) . '">WP Admin</a></div></header><div class="fw-content">' . $this->noticeHtml() . $body . '</div></main></div>';
+        return '<div class="fw-app" id="fw-app"><aside class="fw-sidebar"><div class="fw-brand"><img class="fw-logo" src="' . $logo . '" alt="FilaWarden" width="40" height="40"><div><strong>FilaWarden</strong><span>Operations</span></div></div><nav class="fw-nav"><div class="grp">Core</div>' . $nav . $pro . '</nav><a class="fw-leave" href="' . $wordpress . '">WordPress menu</a></aside><main class="fw-main"><header class="fw-top"><div><h1>' . $title . '</h1><p>WordPress operations sentinel · ' . esc_html($health['status_label']) . ' ' . (int) $health['overall'] . '</p></div><div class="fw-actions"><button type="button" class="fw-btn" id="fw-theme" aria-pressed="false">Dark mode</button><a class="fw-btn" href="' . $wordpress . '">WordPress menu</a></div></header><div class="fw-content">' . $this->noticeHtml() . $body . '</div></main></div>';
     }
 
     public function noticeHtml(): string {
@@ -177,8 +165,6 @@ class FilaWardenPlugin {
             'cron_retried' => ['Cron event rescheduled.', false],
             'cron_forgotten' => ['Cron event removed.', false],
             'cron_invalid' => ['That cron event was not found.', true],
-            'log_truncated' => ['Error log truncated.', false],
-            'log_locked' => ['Error log is not writable.', true],
             'license_saved' => ['License saved.', false],
             'license_invalid' => ['That license key was not accepted.', true],
             'alerts_saved' => ['Alert channels saved.', false],
@@ -300,7 +286,7 @@ class FilaWardenPlugin {
         $hero = '<div class="fw-card fw-hero"><div class="fw-hero-main"><div class="fw-scoretile ' . esc_attr($h['status']) . '">' . (int) $h['overall'] . '</div><div class="fw-hero-copy"><h3>Overall Operations Health</h3><p>Evaluated across 5 core reliability vectors. Last assessment: ' . esc_html($h['evaluated_at']) . '.</p><div class="fw-statusline">' . $this->badge($h['status']) . '<span>' . esc_html($h['status_label']) . '</span></div></div></div><div class="fw-grid cols-5">' . $pills . '</div></div>';
         $links = [
             'auditor' => ['Deployment Auditor', '12 production readiness checks, debug state, and cache validation.'],
-            'infrastructure' => ['Infrastructure Telemetry', 'Real-time /proc CPU load, RAM, disk headroom, and uptime.'],
+            'infrastructure' => ['Infrastructure Telemetry', 'CPU load, memory, disk headroom, and uptime.'],
             'queues' => ['Queue Monitor', 'Background jobs, pending cron, and failed event inspection.'],
             'scheduler' => ['Task Scheduler', 'Cron heartbeat and scheduled event registry.'],
             'database' => ['Database Health', 'Storage footprint, connections, and top tables.'],
@@ -438,7 +424,7 @@ class FilaWardenPlugin {
             $body = $path === '' ? 'No log path is configured.' : 'No log entries yet.';
         }
 
-        return '<div class="fw-card"><div class="fw-k">' . esc_html($path !== '' ? $path : 'Log path not set') . '</div>' . $this->actionForm('truncate_log', [], 'Truncate log', 'danger') . '<pre class="fw-feed">' . $body . '</pre></div>';
+        return '<div class="fw-card"><div class="fw-k">' . esc_html($path !== '' ? $path : 'Log path not set') . '</div><p class="fw-note">This screen reads the log. It does not change the file.</p><pre class="fw-feed">' . $body . '</pre></div>';
     }
 
     private function pageSsl(): string {
@@ -500,27 +486,19 @@ class FilaWardenPlugin {
         if ($action === 'heartbeat') {
             update_option('filawarden_heartbeat', time(), false);
             $notice = 'heartbeat';
-        } elseif ($action === 'truncate_log') {
-            $path = FilaWardenConfig::logPath();
-            if ($path !== '' && is_file($path) && is_writable($path)) {
-                file_put_contents($path, '');
-                $notice = 'log_truncated';
-            } else {
-                $notice = 'log_locked';
-            }
         } elseif ($action === 'rescan_risk') {
             delete_transient('filawarden_risk_files');
             $notice = 'risk_rescanned';
         } elseif ($action === 'forget_cron' || $action === 'retry_cron') {
-            $notice = $this->mutateCron($action) ? ($action === 'retry_cron' ? 'cron_retried' : 'cron_forgotten') : 'cron_invalid';
+            $hook = sanitize_text_field(wp_unslash($_POST['fw_hook'] ?? ''));
+            $ts = absint(wp_unslash($_POST['fw_ts'] ?? 0));
+            $sig = strtolower(sanitize_text_field(wp_unslash($_POST['fw_sig'] ?? '')));
+            $notice = $this->mutateCron($action, $hook, $ts, $sig) ? ($action === 'retry_cron' ? 'cron_retried' : 'cron_forgotten') : 'cron_invalid';
         }
         $this->redirect($notice);
     }
 
-    private function mutateCron(string $action): bool {
-        $hook = sanitize_text_field(wp_unslash($_POST['fw_hook'] ?? ''));
-        $ts = (int) ($_POST['fw_ts'] ?? 0);
-        $sig = strtolower(sanitize_text_field(wp_unslash($_POST['fw_sig'] ?? '')));
+    private function mutateCron(string $action, string $hook, int $ts, string $sig): bool {
         if ($hook === '' || !$ts || !preg_match('/^[A-Za-z0-9_-]+$/', $hook) || !preg_match('/^[a-f0-9]{32}$/', $sig)) {
             return false;
         }

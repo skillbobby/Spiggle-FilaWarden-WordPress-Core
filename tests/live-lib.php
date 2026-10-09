@@ -118,9 +118,10 @@ final class FwLive {
         self::ok(!str_contains($body, 'There has been a critical error'), "{$page} rendered");
         self::ok(str_contains($body, 'id="fw-app"'), "{$page} shell");
         self::ok(str_contains($body, 'fw-screen'), "{$page} screen class");
-        self::ok(str_contains($body, 'id="fw-screen"'), "{$page} chrome style");
-        self::ok(str_contains($body, 'navigation:none'), "{$page} disables view transitions");
-        self::ok(str_contains($body, 'view-transition-name:none'), "{$page} clears menu transition names");
+        self::ok(str_contains($body, 'filawarden-css'), "{$page} enqueues the stylesheet");
+        self::ok(str_contains($body, 'filawarden-boot'), "{$page} enqueues the theme boot script");
+        self::ok(!str_contains($body, 'id="fw-screen"') && !str_contains($body, "id='fw-screen'"), "{$page} does not echo a style tag");
+        self::ok(!str_contains($body, 'localStorage.getItem'), "{$page} does not print the theme script inline");
         self::ok(str_contains($body, 'id="fw-theme"'), "{$page} theme control");
         foreach ($needles as $needle) {
             self::ok(str_contains($body, $needle), "{$page} contains {$needle}");
